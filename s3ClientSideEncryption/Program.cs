@@ -45,9 +45,9 @@ namespace s3ClientSideEncryption
 
               var  keyData = GetKeyByAlias(keyName);
 
-                kmsKeyID = keyData.KeyMetadata.KeyId;
+                kmsKeyID = keyData;
 
-                var keyMetadata = keyData?.KeyMetadata; // An object that contains information about the CMK created by this operation.
+              //  var keyMetadata = keyData?.KeyMetadata; // An object that contains information about the CMK created by this operation.
               
                 var kmsEncryptionMaterials = new EncryptionMaterials(kmsKeyID);
                 // CryptoStorageMode.ObjectMetadata is required for KMS EncryptionMaterials
@@ -98,7 +98,7 @@ namespace s3ClientSideEncryption
             Console.ReadKey();
         }
 
-        static DescribeKeyResponse GetKeyByAlias(string alias)
+        static string GetKeyByAlias(string alias)
         {
             //how does it know what credentials to use? - it first looks at app.config or webconfig, 
             // then the profile in the SDK Store, then the local credentials file
@@ -122,9 +122,10 @@ namespace s3ClientSideEncryption
             var foundAlias = aliasResponse.Aliases.Where(r => r.AliasName == "alias/" + alias).FirstOrDefault();
             if (foundAlias != null)
             {
-                string keyID =  foundAlias.TargetKeyId;
-                var keyData = client.DescribeKeyAsync(keyID).GetAwaiter().GetResult();
-                return keyData;
+                return  foundAlias.TargetKeyId;
+                //    var keyData = client.DescribeKeyAsync(keyID).GetAwaiter().GetResult();
+                //    return keyData?;
+                //
             }
 
             return null;
