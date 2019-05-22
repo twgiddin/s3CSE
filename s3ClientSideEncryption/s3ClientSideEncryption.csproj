@@ -6,8 +6,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="AWSSDK.KeyManagementService" Version="3.3.101.4" />
-    <PackageReference Include="AWSSDK.S3" Version="3.3.101.16" />
+    <PackageReference Include="AWSSDK.KeyManagementService" Version="3.3.101.7" />
+    <PackageReference Include="AWSSDK.S3" Version="3.3.102.2" />
   </ItemGroup>
 
 </Project>
