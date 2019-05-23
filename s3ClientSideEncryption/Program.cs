@@ -24,7 +24,7 @@ namespace s3ClientSideEncryption
         static string keyName = "NetDataEncryptionKeyForLegacyApplication";
 
         static Amazon.RegionEndpoint defaultEndpoint = Amazon.RegionEndpoint.USEast1;
-        //Encryption context needs to be a json string, both the key and the value can be changed
+
         static string jsonStringEncryptionContext = "{\"customContext\": \"This is my context, there are many like it but this one is mine \"}";
 
 
@@ -37,25 +37,169 @@ namespace s3ClientSideEncryption
                 Console.ReadKey();
 
             }
-            UploadFileWithClientSideEncryption(filePath);
+             ClientSideEncryptWithKMSThenUpload(filePath);
+            //UploadFileWithClientSideEncryption(filePath);
 
         }
 
-     
-        static void UploadFileWithClientSideEncryption(string filePath)
+        static void ClientSideEncryptWithKMSThenUpload(string filePath)
+        {
+            UploadManualEncrypt(filePath);
+
+            DownloadManualEncrypt(filePath);
+
+
+        }
+        //This is the context I am using for the example, use whatever you want, just know the key value pairs must match (including case) exactly
+        static string myContext = "This is my Context, there are many like it, but this one is mine";
+        static void UploadManualEncrypt(string filePath)
         {
             string kmsKeyID = "";
-          
+            var objectKey = System.IO.Path.GetFileName(filePath);
+
+            using (var aes = Aes.Create())
+            using (var kmsClient = new AmazonKeyManagementServiceClient(defaultEndpoint))
+            {
+                //Get the key from KMS
+                kmsKeyID = GetKeyByAlias(keyName, kmsClient);
+                //Generate a data key for the specific object
+                var dataKeyRequest = new GenerateDataKeyRequest();
+                dataKeyRequest.KeyId = kmsKeyID;
+                dataKeyRequest.KeySpec = DataKeySpec.AES_256;
+                //Set the encryption context for your AAD
+                dataKeyRequest.EncryptionContext["MyContext"] = myContext;
+                var dataKeyResponse = kmsClient.GenerateDataKeyAsync(dataKeyRequest).GetAwaiter().GetResult();
+
+                var fileData = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+                Stream output = new MemoryStream();
+                //Write the length of the encrypted key first so we can retrieve it later
+                output.WriteByte((byte)dataKeyResponse?.CiphertextBlob?.Length);
+                //Write the encrypted key to next
+                dataKeyResponse.CiphertextBlob.CopyTo(output);
+                aes.Key = dataKeyResponse.Plaintext.ToArray();
+                //Then write the IV, since IV is fixed length we don't have to worry about storing the IV length
+                output.Write(aes.IV, 0, aes.IV.Length);
+                using (var cs = new CryptoStream(output, aes.CreateEncryptor(), CryptoStreamMode.Write))
+                {
+                    //Now encrypt the file data into the stream
+                    fileData.CopyTo(cs);
+                    cs.FlushFinalBlock();
+
+
+                    using (var s3client = new AmazonS3Client(defaultEndpoint))
+                    {
+                        var putRequest = new PutObjectRequest
+                        {
+                            BucketName = bucketName,
+                            Key = objectKey,
+                            InputStream = output
+
+                        };
+
+
+                        //All of this metadata is optional, you do not have to include any of this
+                        //I am just putting it here if you want to store it in the metadata along with the object
+                        //The encrypted data key and IV are already stored with the file, you will need a way to look up the context and keyid
+                        putRequest.Metadata.Add("x-amz-meta-client-side-encryption-context", myContext);
+                        putRequest.Metadata.Add("x-amz-meta-client-side-encryption-aws-kms-key-id", kmsKeyID);
+                        putRequest.Metadata.Add("x-amz-meta-cipherblob", Convert.ToBase64String(dataKeyResponse.CiphertextBlob.ToArray()));
+                        putRequest.Metadata.Add("x-amz-meta-x-amz-iv", Convert.ToBase64String(aes.IV));
+                       
+
+                        s3client.PutObjectAsync(putRequest).GetAwaiter().GetResult();
+                    }
+                }
+
+            }
+        }
+
+     
+        static void DownloadManualEncrypt(string filePath)
+        {
+            string objectKey = System.IO.Path.GetFileName(filePath);
+
+            using (var s3c = new AmazonS3Client(defaultEndpoint))
+            using (var aes = Aes.Create())
+            using (var kmsClient = new AmazonKeyManagementServiceClient(defaultEndpoint))
+            {
+
+                //Get the encrypted file
+                var getRequest = new GetObjectRequest();
+                getRequest.BucketName = bucketName;
+                getRequest.Key = objectKey;
+                var s3Response = s3c.GetObjectAsync(getRequest).GetAwaiter().GetResult();
+
+
+                using (var algorithm = Aes.Create())
+                {
+                    //Get the length of the encrypted key
+                    var length = s3Response.ResponseStream.ReadByte();
+                   //read in the encrypted key
+                    var buffer = new byte[length];
+                    s3Response.ResponseStream.Read(buffer, 0, length);
+                  
+                    DecryptRequest decryptRequest = new DecryptRequest()
+                    {
+                        CiphertextBlob = new MemoryStream(buffer),
+                        
+
+                    };
+                    //All you need to supply is the context
+                    decryptRequest.EncryptionContext["MyContext"] = myContext;
+
+                    var decryptedData = kmsClient.DecryptAsync(decryptRequest).GetAwaiter().GetResult();
+                    algorithm.Key = decryptedData.Plaintext.ToArray();
+                    var iv = algorithm.IV;
+                    //The IV is inbedded into the file when uploaded
+                    s3Response.ResponseStream.Read(iv, 0, iv.Length);
+                    algorithm.IV = iv;
+                    string outputPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(filePath), System.IO.Path.GetFileNameWithoutExtension(filePath) + "_" + new Random().Next(0, 1000).ToString() + System.IO.Path.GetExtension(filePath));
+
+                  //decrypt and write to a local file
+                    using (var cryptoStream = new CryptoStream(s3Response.ResponseStream,
+                        algorithm.CreateDecryptor(), CryptoStreamMode.Read))
+                    {
+                        using (var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+                        {
+                            cryptoStream.CopyTo(fileStream);
+                            fileStream.Flush();
+                            fileStream.Close();
+                        }
+                    }
+
+                    Console.WriteLine($"Wrote file to {outputPath}");
+                }
+
+
+              
+            }
+        }
+
+
+        static void UploadFileWithClientSideEncryption(string filePath)
+        {
+            string kmsKeyID = null;
+
 
             var objectKey = System.IO.Path.GetFileName(filePath);
 
             using (var kmsClient = new AmazonKeyManagementServiceClient(defaultEndpoint))
             {
 
-             
+                // var response = kmsClient.CreateKeyAsync(new CreateKeyRequest()).GetAwaiter().GetResult();
+
                 kmsKeyID = GetKeyByAlias(keyName, kmsClient);
+
+
+                //  var keyMetadata = keyData?.KeyMetadata; // An object that contains information about the CMK created by this operation.
+
                 var kmsEncryptionMaterials = new EncryptionMaterials(kmsKeyID);
-                                  
+
+
+
+                //set encryption context
+
+
 
                 using (var s3Client = new AmazonS3EncryptionClient(defaultEndpoint, kmsEncryptionMaterials))
                 {
@@ -67,25 +211,21 @@ namespace s3ClientSideEncryption
                         Key = objectKey,
                         FilePath = filePath
                     };
-
-                    //Set the master key id for the key you want to use, each object will be encrypted with its own data key
+                    putRequest.Metadata.Add("x-amz-meta-moo", "This is a test");
+                    //      putRequest.Headers["x-amz-matdesc"] = System.Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(jsonStringEncryptionContext));
+                    putRequest.Headers["x-amz-server-side-encryption"] = "aws:kms";
                     putRequest.Headers["x-amz-server-side-encryption-aws-kms-key-id"] = kmsKeyID;
-                    //SET the encryption context header
                     putRequest.Headers["x-amz-server-side-encryption-context"] = System.Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(jsonStringEncryptionContext));
 
-                    //Set the server side encryption mode to KMS
-                    putRequest.Headers["x-amz-server-side-encryption"] = "aws:kms";
-                    
-                    
 
 
                     s3Client.PutObjectAsync(putRequest).GetAwaiter().GetResult();
                 }
-                
                 // The KeyID is actually embedded in the metadata of the object and the encryptionclient automatically looks it up so you don't actually have to do that yourself
+
                 var kem2 = new EncryptionMaterials("1111111-11111-11111111-11111111");
 
-        
+
 
                 using (var s3Client2 = new AmazonS3EncryptionClient(defaultEndpoint, kem2))
                 {
@@ -99,7 +239,6 @@ namespace s3ClientSideEncryption
                     };
 
                     string fPath2 = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(filePath), System.IO.Path.GetFileNameWithoutExtension(filePath) + "_" + new Random().Next(0, 1000).ToString() + System.IO.Path.GetExtension(filePath));
-                    //You don't have to re-set all of the headers here because the S3EncryptionClient reads the metadata automatically and uses it to preform the decryption
 
                     using (var getResponse = s3Client2.GetObjectAsync(getRequest).GetAwaiter().GetResult())
                     using (var stream = getResponse.ResponseStream)
@@ -133,7 +272,7 @@ namespace s3ClientSideEncryption
             // for production we would use the local store on the EC2 instance
             //this should be transparent and allow for definition by environment
 
-        
+
             var aliasResponse = client.ListAliasesAsync(new ListAliasesRequest() { Limit = 1000 }).GetAwaiter().GetResult();
 
             if (aliasResponse == null || aliasResponse.Aliases == null)
@@ -144,7 +283,7 @@ namespace s3ClientSideEncryption
             var foundAlias = aliasResponse.Aliases.Where(r => r.AliasName == "alias/" + alias).FirstOrDefault();
             if (foundAlias != null)
             {
-                return  foundAlias.TargetKeyId;
+                return foundAlias.TargetKeyId;
                 //    var keyData = client.DescribeKeyAsync(keyID).GetAwaiter().GetResult();
                 //    return keyData?;
                 //
